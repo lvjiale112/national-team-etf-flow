@@ -359,6 +359,55 @@ def fetch_em_share(code):
 
     return retry(_get, tries=3, gap=2)
 
+HS300_HEAD = ("510300", "510310", "510330", "159919")   # 头部沪深300ETF: 华泰柏瑞/易方达/华夏/嘉实
+FCAP_RECHECK = 5   # 最近若干交易日每次复核(东财估值表收盘后分批更新, 当日可能不全)
+
+def fetch_hs300_fcap(dates, cache):
+    """沪深300成分股A股流通市值合计(元), 写入并返回 cache['hs300_fcap'] = {YYYYMMDD: 元|None}.
+    逐股流通市值取东财数据中心估值表 RPT_VALUEANALYSIS_DET 的 NOTLIMITED_MARKETCAP_A, 成分股取中证指数官网当前名单.
+    已缓存日期不再重拉(最近 FCAP_RECHECK 日除外), 故首次回补的历史日期按回补当时的成分股口径计算."""
+    got = cache.setdefault("hs300_fcap", {})
+    recent = set(dates[-FCAP_RECHECK:])
+    need = sorted({d for d in dates if d not in got} | recent)
+    if not need:
+        return got
+    cons = retry(lambda: ak.index_stock_cons_csindex(symbol="000300"))
+    codes = sorted({str(c).zfill(6) for c in cons["成分券代码"]})
+    if len(codes) < 290:
+        raise ValueError("沪深300成分股数量异常: %d" % len(codes))
+    s = f"{need[0][:4]}-{need[0][4:6]}-{need[0][6:]}"
+    e = f"{need[-1][:4]}-{need[-1][4:6]}-{need[-1][6:]}"
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+    tot, cnt = {}, {}
+    for i in range(0, len(codes), 100):
+        flt = "(SECURITY_CODE in (%s))(TRADE_DATE>='%s')(TRADE_DATE<='%s')" % (
+            ",".join('"%s"' % c for c in codes[i:i + 100]), s, e)
+        page = 1
+        while True:
+            params = {"reportName": "RPT_VALUEANALYSIS_DET", "columns": "SECURITY_CODE,TRADE_DATE,NOTLIMITED_MARKETCAP_A",
+                      "filter": flt, "pageNumber": page, "pageSize": 5000, "sortColumns": "TRADE_DATE,SECURITY_CODE",
+                      "sortTypes": "1,1", "source": "WEB", "client": "WEB"}
+            j = retry(lambda prm=params: requests.get(url, params=prm, headers=headers, timeout=30).json())
+            res = j.get("result") or {}
+            for r in res.get("data") or []:
+                d = str(r.get("TRADE_DATE"))[:10].replace("-", "")
+                v = r.get("NOTLIMITED_MARKETCAP_A")
+                if v:
+                    tot[d] = tot.get(d, 0.0) + float(v)
+                    cnt[d] = cnt.get(d, 0) + 1
+            if page >= (res.get("pages") or 1):
+                break
+            page += 1
+    full = int(len(codes) * 0.95)
+    for d in need:
+        if cnt.get(d, 0) >= full:
+            got[d] = round(tot[d])
+        elif d not in recent:
+            got[d] = None   # 历史日成分股覆盖不足(多为当时尚未上市的新成分股): 记空值, 不再重复回补
+    print("沪深300流通市值: %s~%s 新增/复核 %d 日, 成分股 %d 只" % (need[0], need[-1], len(need), len(codes)), flush=True)
+    return got
+
 def load_nav():
     nav = {}
     for code, _, _ in TARGETS:
@@ -678,6 +727,33 @@ def main():
                 tot += s * w
         mv_total[ds] = round(tot / 1e8, 1)
     payload["mv_total"] = mv_total
+    # 头部沪深300ETF市值 ÷ 沪深300成分股流通市值; 区间与累计持仓曲线一致(自深市有数据起)
+    hs_days = [d for d in dates_sorted if not deep_start or d >= str(deep_start)]
+    try:
+        fcap = fetch_hs300_fcap(hs_days, cache)
+        with open(SHARES_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception as e:
+        print("沪深300流通市值拉取失败(该图沿用缓存):", str(e)[:90], flush=True)
+        fcap = cache.get("hs300_fcap", {})
+    hs = {"d": [], "mv": [], "fcap": [], "r": []}
+    last_seen = {}
+    for ds in dates_sorted:
+        mv = 0.0
+        for c in HS300_HEAD:
+            pd = per_day.get(c, {})
+            if ds in pd:
+                last_seen[c] = pd[ds]
+            s, w = last_seen.get(c, (None, None))
+            if s is not None and w is not None:
+                mv += s * w
+        fc = fcap.get(ds)
+        if ds in hs_days and fc and mv:
+            hs["d"].append(f"{ds[:4]}-{ds[4:6]}-{ds[6:]}")
+            hs["mv"].append(round(mv / 1e8, 1))
+            hs["fcap"].append(round(fc / 1e8))
+            hs["r"].append(round(mv / fc * 100, 3))
+    payload["hs300"] = hs
     return payload
 
 def escape_html(s):
@@ -808,6 +884,32 @@ def render_html(p):
       "   chart.setOption(opt(cur,ci));\n"
       " });});\n"
       "window.addEventListener('resize',function(){chart.resize();});\n"
+      "}\n"
+      "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}\n"
+      "})();\n"
+      "</script>")
+
+    # --- 头部沪深300ETF市值 / 沪深300流通市值 占比 ---
+    _hs = p.get("hs300") or {"d": [], "mv": [], "fcap": [], "r": []}
+    hs_last = (f"{_hs['d'][-1]} 占比 <b>{_hs['r'][-1]:.2f}%</b> · ETF市值 {_hs['mv'][-1]:,.0f}亿 · 流通市值 {_hs['fcap'][-1]/1e4:,.2f}万亿"
+               if _hs["d"] else "暂无数据")
+    HS_JS = ("<script>\n"
+      "var HS=" + json.dumps(_hs, ensure_ascii=False) + ";\n"
+      "(function(){\n"
+      "function go(){\n"
+      " var box=document.getElementById('hsBox');\n"
+      " if(!window.echarts||!HS.d.length){box.style.display='none';return;}\n"
+      " var chart=echarts.init(box);\n"
+      " chart.setOption({grid:{left:50,right:56,top:16,bottom:46},\n"
+      "  xAxis:{type:'category',data:HS.d,boundaryGap:false,axisLine:{lineStyle:{color:'#c9cfdd'}},axisLabel:{color:'#7a8194',fontSize:10},axisTick:{show:false}},\n"
+      "  yAxis:{scale:true,position:'right',splitLine:{lineStyle:{color:'#eef1f6'}},axisLabel:{color:'#7a8194',fontSize:10,formatter:function(v){return v.toFixed(2)+'%';}}},\n"
+      "  dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:0,brushSelect:false,textStyle:{fontSize:9,color:'#7a8194'},borderColor:'#dfe4ef',fillerColor:'rgba(99,126,188,0.12)',handleStyle:{color:'#b7c2da'}}],\n"
+      "  series:[{name:'占比',type:'line',data:HS.r,showSymbol:false,lineStyle:{width:1.5,color:'#2f54eb'},itemStyle:{color:'#2f54eb'},areaStyle:{color:'rgba(47,84,235,0.08)'}}],\n"
+      "  tooltip:{trigger:'axis',confine:true,backgroundColor:'#2a2f3a',borderWidth:0,textStyle:{color:'#fff',fontSize:12},\n"
+      "   formatter:function(ps){var i=ps[0].dataIndex;\n"
+      "    return '<b>'+HS.d[i]+'</b><br>占比 <b>'+HS.r[i].toFixed(3)+'%</b><br>头部ETF市值 '+HS.mv[i].toFixed(0)+' 亿<br>沪深300流通市值 '+(HS.fcap[i]/1e4).toFixed(2)+' 万亿';}}\n"
+      " });\n"
+      " window.addEventListener('resize',function(){chart.resize();});\n"
       "}\n"
       "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}\n"
       "})();\n"
@@ -1090,6 +1192,13 @@ svg text{{fill:var(--mut);font-size:10px}}
       </svg>
     </div></div>
     {JS_CODE}
+  </div>
+  <div class="card"><h2>头部沪深300ETF市值 / 沪深300流通市值（%，悬停查看）</h2>
+    <div class="ktip" style="text-align:left;margin:0 0 8px">{hs_last}</div>
+    <div id="hsBox" style="height:300px;width:100%"></div>
+    <div style="color:var(--mut);font-size:11px;margin-top:8px">分子＝华泰柏瑞 510300、易方达 510310、华夏 510330、嘉实 159919 四只沪深300ETF 的 份额×单位净值 合计；
+      分母＝沪深300成分股 A 股流通市值合计（东财估值表逐股求和，成分股按中证指数官网当前名单，首次回补的历史日期沿用回补时名单）。流通市值非中证指数加权用的自由流通市值。</div>
+    {HS_JS}
   </div>
   <div class="card"><h2>指数K线 × 每日净买入联动（上K线 下当日净买卖 · 悬停查看）</h2>
     <div class="klnctl"><span class="kp">指数</span>
