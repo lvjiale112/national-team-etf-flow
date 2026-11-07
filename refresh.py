@@ -889,30 +889,16 @@ def render_html(p):
       "})();\n"
       "</script>")
 
-    # --- 头部沪深300ETF市值 / 沪深300流通市值 占比 ---
+    # --- 头部沪深300ETF市值 / 沪深300流通市值 占比 × 沪深300指数 ---
     _hs = p.get("hs300") or {"d": [], "mv": [], "fcap": [], "r": []}
     hs_last = (f"{_hs['d'][-1]} 占比 <b>{_hs['r'][-1]:.2f}%</b> · ETF市值 {_hs['mv'][-1]:,.0f}亿 · 流通市值 {_hs['fcap'][-1]/1e4:,.2f}万亿"
                if _hs["d"] else "暂无数据")
+    _hs_k = dict(zip(dates, p.get("cat_kline", {}).get("沪深300") or []))
+    _hs["k"] = [(_hs_k.get(d) or {}).get("c") for d in _hs["d"]]
     HS_JS = ("<script>\n"
       "var HS=" + json.dumps(_hs, ensure_ascii=False) + ";\n"
-      "(function(){\n"
-      "function go(){\n"
-      " var box=document.getElementById('hsBox');\n"
-      " if(!window.echarts||!HS.d.length){box.style.display='none';return;}\n"
-      " var chart=echarts.init(box);\n"
-      " chart.setOption({grid:{left:50,right:56,top:16,bottom:46},\n"
-      "  xAxis:{type:'category',data:HS.d,boundaryGap:false,axisLine:{lineStyle:{color:'#c9cfdd'}},axisLabel:{color:'#7a8194',fontSize:10},axisTick:{show:false}},\n"
-      "  yAxis:{scale:true,position:'right',splitLine:{lineStyle:{color:'#eef1f6'}},axisLabel:{color:'#7a8194',fontSize:10,formatter:function(v){return v.toFixed(2)+'%';}}},\n"
-      "  dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:0,brushSelect:false,textStyle:{fontSize:9,color:'#7a8194'},borderColor:'#dfe4ef',fillerColor:'rgba(99,126,188,0.12)',handleStyle:{color:'#b7c2da'}}],\n"
-      "  series:[{name:'占比',type:'line',data:HS.r,showSymbol:false,lineStyle:{width:1.5,color:'#2f54eb'},itemStyle:{color:'#2f54eb'},areaStyle:{color:'rgba(47,84,235,0.08)'}}],\n"
-      "  tooltip:{trigger:'axis',confine:true,backgroundColor:'#2a2f3a',borderWidth:0,textStyle:{color:'#fff',fontSize:12},\n"
-      "   formatter:function(ps){var i=ps[0].dataIndex;\n"
-      "    return '<b>'+HS.d[i]+'</b><br>占比 <b>'+HS.r[i].toFixed(3)+'%</b><br>头部ETF市值 '+HS.mv[i].toFixed(0)+' 亿<br>沪深300流通市值 '+(HS.fcap[i]/1e4).toFixed(2)+' 万亿';}}\n"
-      " });\n"
-      " window.addEventListener('resize',function(){chart.resize();});\n"
-      "}\n"
-      "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}\n"
-      "})();\n"
+      "dualChart('hsBox',HS.d,HS.r,HS.k,'占比','沪深300',function(v){return v.toFixed(2)+'%';},\n"
+      " function(i){return '<br>头部ETF市值 '+HS.mv[i].toFixed(0)+' 亿<br>沪深300流通市值 '+(HS.fcap[i]/1e4).toFixed(2)+' 万亿';});\n"
       "</script>")
 
     _cat_opts = "".join('<option%s>%s</option>' % (' selected' if i == 0 else '', _n) for i, _n in enumerate(i_kl_names))
@@ -1043,39 +1029,30 @@ def render_html(p):
           <div class="bwrap"><div class="bar {cls(v)}" style="height:{max(h,1.5):.1f}%"></div></div>
           <div class="dt">{d[5:]}</div></div>"""
 
-    # 累计持仓金额折线(SVG)
-    W, H = 860, 120; pad = 12
-    mn, mx = min(y_mv), max(y_mv)
-    if mn == mx: mn -= 1; mx += 1
-    npts = len(y_mv)
-    pts = []
-    for i, v in enumerate(y_mv):
-        x = pad + i * (W - 2 * pad) / (npts - 1)
-        y = H - pad - (v - mn) / (mx - mn) * (H - 2 * pad)
-        pts.append(f"{x:.1f},{y:.1f}")
-    poly = " ".join(pts)
-    last_pts = pts[-1]; last_v = y_mv[-1]
-    ypt_json = json.dumps([{"d": y_dates[i], "v": round(y_mv[i], 1)} for i in range(len(y_dates))], ensure_ascii=False)
+    # 累计持仓金额 × 中证全指(ECharts 双轴: 左=持仓金额, 右=指数收盘)
+    y_idx = [(k or {}).get("c") for k in (p.get("kline") or [None] * len(dates))[bidx:]]
     JS_CODE = ("<script>\n"
-      "const YPT=" + ypt_json + ";\n"
-      "const C0=" + str(pad) + ",C1=" + str(W - pad) + ",CH=" + str(H) +
-      ",CMN=" + f"{mn:.0f}" + ",CMX=" + f"{mx:.0f}" + ",WW=" + str(W) + ";\n"
-      "const CVD=document.getElementById('cumSvg'),TIP=document.getElementById('cumTip'),G=document.getElementById('cumGuide');\n"
-      "const N=YPT.length;\n"
-      "function xAt(i){return C0+i*(C1-C0)/(N-1);}\n"
-      "function FMT(v){return v.toFixed(1)+'亿';}\n"
-      "CVD.addEventListener('mousemove',function(e){"
-      "var r=CVD.getBoundingClientRect();"
-      "var sx=(e.clientX-r.left)/r.width*WW;"
-      "var i=Math.round((sx-C0)/(C1-C0)*(N-1));"
-      "if(i<0)i=0;if(i>N-1)i=N-1;"
-      "var p=YPT[i],gx=xAt(i);"
-      "G.setAttribute('x1',gx);G.setAttribute('x2',gx);"
-      "TIP.style.color='var(--accent)';"
-      "TIP.textContent='日期 '+p.d+'  持仓金额 '+FMT(p.v);"
-      "});"
-      "CVD.addEventListener('mouseleave',function(){G.setAttribute('x1',-10);G.setAttribute('x2',-10);});"
-      "\n</script>")
+      "function dualChart(id,D,A,B,an,bn,fa,extra){\n"
+      " var box=document.getElementById(id);\n"
+      " if(!window.echarts||!D.length){box.style.display='none';return;}\n"
+      " var c=echarts.init(box),ax={color:'#7a8194',fontSize:10};\n"
+      " c.setOption({grid:{left:58,right:58,top:30,bottom:46},\n"
+      "  legend:{top:0,right:8,itemWidth:16,itemHeight:2,textStyle:{color:'#7a8194',fontSize:11},data:[an,bn]},\n"
+      "  xAxis:{type:'category',data:D,boundaryGap:false,axisLine:{lineStyle:{color:'#c9cfdd'}},axisLabel:ax,axisTick:{show:false}},\n"
+      "  yAxis:[{scale:true,position:'left',splitLine:{lineStyle:{color:'#eef1f6'}},axisLabel:{color:'#2f54eb',fontSize:10,formatter:fa}},\n"
+      "         {scale:true,position:'right',splitLine:{show:false},axisLabel:{color:'#d9822b',fontSize:10}}],\n"
+      "  dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:0,brushSelect:false,textStyle:{fontSize:9,color:'#7a8194'},borderColor:'#dfe4ef',fillerColor:'rgba(99,126,188,0.12)',handleStyle:{color:'#b7c2da'}}],\n"
+      "  series:[{name:an,type:'line',data:A,showSymbol:false,lineStyle:{width:1.6,color:'#2f54eb'},itemStyle:{color:'#2f54eb'},areaStyle:{color:'rgba(47,84,235,0.08)'}},\n"
+      "          {name:bn,type:'line',yAxisIndex:1,data:B,showSymbol:false,connectNulls:true,lineStyle:{width:1.2,color:'#d9822b'},itemStyle:{color:'#d9822b'}}],\n"
+      "  tooltip:{trigger:'axis',confine:true,backgroundColor:'#2a2f3a',borderWidth:0,textStyle:{color:'#fff',fontSize:12},\n"
+      "   formatter:function(ps){var i=ps[0].dataIndex;\n"
+      "    return '<b>'+D[i]+'</b><br>'+an+' <b>'+fa(A[i])+'</b><br>'+bn+' '+(B[i]==null?'—':B[i].toFixed(2))+(extra?extra(i):'');}}\n"
+      " });\n"
+      " window.addEventListener('resize',function(){c.resize();});\n"
+      "}\n"
+      "dualChart('cumBox'," + json.dumps(y_dates) + "," + json.dumps(y_mv) + "," + json.dumps(y_idx) +
+      ",'持仓金额','中证全指',function(v){return v.toFixed(0)+'亿';});\n"
+      "</script>")
 
     def fmt_dt(d):
         return f"{d[0:4]}-{d[5:7]}-{d[8:10]}"
@@ -1179,21 +1156,13 @@ svg text{{fill:var(--mut);font-size:10px}}
   </div>
   <div class="card"><h2>全部品种 · 每日净买卖合计（近21个交易日，亿元）</h2>
     <div class="bars">{bars}</div>
-    <div class="svgwrap"><div class="chartbox">
-      <h2 style="font-size:14px">累计持仓金额 · 最长 {len(y_dates)}个交易日（亿元 · 悬停查看当日）</h2>
-      <div id="cumTip" class="cumtip"></div>
-      <svg id="cumSvg" viewBox="0 0 {W} {H}" width="100%" height="{H}" preserveAspectRatio="none">
-        <line id="cumGuide" x1="-10" y1="{pad}" x2="-10" y2="{H-pad}" stroke="#c0c6d4" stroke-width="1" stroke-dasharray="3 3"/>
-        <polyline points="{poly}" fill="none" stroke="#2f54eb" stroke-width="1.5"/>
-        <circle cx="{last_pts.split(',')[0]}" cy="{last_pts.split(',')[1]}" r="3.5" fill="#2f54eb"/>
-        <text x="{pad}" y="{pad-4}">{mn:.0f}</text>
-        <text x="{W-pad}" y="{pad-4}" text-anchor="end">{mx:.0f}亿</text>
-        <text x="{W-pad}" y="{H-6}" text-anchor="end">{last_v:,.0f}亿</text>
-      </svg>
-    </div></div>
+    <div class="svgwrap">
+      <h2 style="font-size:14px">累计持仓金额 × 中证全指 · 最长 {len(y_dates)}个交易日（左轴亿元 / 右轴指数点位 · 悬停查看当日）</h2>
+      <div id="cumBox" style="height:300px;width:100%"></div>
+    </div>
     {JS_CODE}
   </div>
-  <div class="card"><h2>头部沪深300ETF市值 / 沪深300流通市值（%，悬停查看）</h2>
+  <div class="card"><h2>头部沪深300ETF市值 / 沪深300流通市值 × 沪深300指数（左轴占比% / 右轴指数点位 · 悬停查看）</h2>
     <div class="ktip" style="text-align:left;margin:0 0 8px">{hs_last}</div>
     <div id="hsBox" style="height:300px;width:100%"></div>
     <div style="color:var(--mut);font-size:11px;margin-top:8px">分子＝华泰柏瑞 510300、易方达 510310、华夏 510330、嘉实 159919 四只沪深300ETF 的 份额×单位净值 合计；
