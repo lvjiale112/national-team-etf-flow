@@ -748,11 +748,11 @@ def main():
             if s is not None and w is not None:
                 mv += s * w
         fc = fcap.get(ds)
-        if ds in hs_days and fc and mv:
+        if ds in hs_days and mv:
             hs["d"].append(f"{ds[:4]}-{ds[4:6]}-{ds[6:]}")
             hs["mv"].append(round(mv / 1e8, 1))
-            hs["fcap"].append(round(fc / 1e8))
-            hs["r"].append(round(mv / fc * 100, 3))
+            hs["fcap"].append(round(fc / 1e8) if fc else None)
+            hs["r"].append(round(mv / fc * 100, 3) if fc else None)
     payload["hs300"] = hs
     return payload
 
@@ -889,18 +889,6 @@ def render_html(p):
       "})();\n"
       "</script>")
 
-    # --- 头部沪深300ETF市值 / 沪深300流通市值 占比 × 沪深300指数 ---
-    _hs = p.get("hs300") or {"d": [], "mv": [], "fcap": [], "r": []}
-    hs_last = (f"{_hs['d'][-1]} 占比 <b>{_hs['r'][-1]:.2f}%</b> · ETF市值 {_hs['mv'][-1]:,.0f}亿 · 流通市值 {_hs['fcap'][-1]/1e4:,.2f}万亿"
-               if _hs["d"] else "暂无数据")
-    _hs_k = dict(zip(dates, p.get("cat_kline", {}).get("沪深300") or []))
-    _hs["k"] = [(_hs_k.get(d) or {}).get("c") for d in _hs["d"]]
-    HS_JS = ("<script>\n"
-      "var HS=" + json.dumps(_hs, ensure_ascii=False) + ";\n"
-      "dualChart('hsBox',HS.d,HS.r,HS.k,'占比','沪深300',function(v){return v.toFixed(2)+'%';},\n"
-      " function(i){return '<br>头部ETF市值 '+HS.mv[i].toFixed(0)+' 亿<br>沪深300流通市值 '+(HS.fcap[i]/1e4).toFixed(2)+' 万亿';});\n"
-      "</script>")
-
     _cat_opts = "".join('<option%s>%s</option>' % (' selected' if i == 0 else '', _n) for i, _n in enumerate(i_kl_names))
 
     # 内联 ECharts，避免境外 CDN 在本机加载失败导致图表空白
@@ -1029,29 +1017,53 @@ def render_html(p):
           <div class="bwrap"><div class="bar {cls(v)}" style="height:{max(h,1.5):.1f}%"></div></div>
           <div class="dt">{d[5:]}</div></div>"""
 
-    # 累计持仓金额 × 中证全指(ECharts 双轴: 左=持仓金额, 右=指数收盘)
-    y_idx = [(k or {}).get("c") for k in (p.get("kline") or [None] * len(dates))[bidx:]]
+    # 持仓金额 × 指数: 全部持仓金额与头部沪深300ETF市值同为左轴(亿元), 右轴指数点位可切换; 占沪深300流通市值比例见悬停
+    _hs = p.get("hs300") or {"d": [], "mv": [], "fcap": [], "r": []}
+    _hsm = {d: (_hs["mv"][i], _hs["fcap"][i], _hs["r"][i]) for i, d in enumerate(_hs["d"])}
+    _hs_k = p.get("cat_kline", {}).get("沪深300") or [None] * len(dates)
+    _zz_k = p.get("kline") or [None] * len(dates)
+    MV = {"d": y_dates, "all": y_mv,
+          "hs": [(_hsm.get(d) or (None,))[0] for d in y_dates],
+          "fc": [(_hsm.get(d) or (None, None))[1] for d in y_dates],
+          "r": [(_hsm.get(d) or (None, None, None))[2] for d in y_dates],
+          "k": [[(k or {}).get("c") for k in _zz_k[bidx:]], [(k or {}).get("c") for k in _hs_k[bidx:]]],
+          "kn": ["中证全指", "沪深300"]}
+    _r_last = next((x for x in reversed(MV["r"]) if x is not None), None)
+    _f_last = next((x for x in reversed(MV["fc"]) if x is not None), None)
+    mv_last = (f"{y_dates[-1]} · 全部持仓 <b>{y_mv[-1]:,.0f}亿</b> · 头部沪深300ETF <b>{(MV['hs'][-1] or 0):,.0f}亿</b>"
+               + (f"，占沪深300流通市值 <b>{_r_last:.2f}%</b>（{_f_last/1e4:,.2f}万亿）" if _r_last is not None else ""))
     JS_CODE = ("<script>\n"
-      "function dualChart(id,D,A,B,an,bn,fa,extra){\n"
-      " var box=document.getElementById(id);\n"
-      " if(!window.echarts||!D.length){box.style.display='none';return;}\n"
-      " var c=echarts.init(box),ax={color:'#7a8194',fontSize:10};\n"
-      " c.setOption({grid:{left:58,right:58,top:30,bottom:46},\n"
-      "  legend:{top:0,right:8,itemWidth:16,itemHeight:2,textStyle:{color:'#7a8194',fontSize:11},data:[an,bn]},\n"
-      "  xAxis:{type:'category',data:D,boundaryGap:false,axisLine:{lineStyle:{color:'#c9cfdd'}},axisLabel:ax,axisTick:{show:false}},\n"
-      "  yAxis:[{scale:true,position:'left',splitLine:{lineStyle:{color:'#eef1f6'}},axisLabel:{color:'#2f54eb',fontSize:10,formatter:fa}},\n"
-      "         {scale:true,position:'right',splitLine:{show:false},axisLabel:{color:'#d9822b',fontSize:10}}],\n"
-      "  dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:0,brushSelect:false,textStyle:{fontSize:9,color:'#7a8194'},borderColor:'#dfe4ef',fillerColor:'rgba(99,126,188,0.12)',handleStyle:{color:'#b7c2da'}}],\n"
-      "  series:[{name:an,type:'line',data:A,showSymbol:false,lineStyle:{width:1.6,color:'#2f54eb'},itemStyle:{color:'#2f54eb'},areaStyle:{color:'rgba(47,84,235,0.08)'}},\n"
-      "          {name:bn,type:'line',yAxisIndex:1,data:B,showSymbol:false,connectNulls:true,lineStyle:{width:1.2,color:'#d9822b'},itemStyle:{color:'#d9822b'}}],\n"
-      "  tooltip:{trigger:'axis',confine:true,backgroundColor:'#2a2f3a',borderWidth:0,textStyle:{color:'#fff',fontSize:12},\n"
-      "   formatter:function(ps){var i=ps[0].dataIndex;\n"
-      "    return '<b>'+D[i]+'</b><br>'+an+' <b>'+fa(A[i])+'</b><br>'+bn+' '+(B[i]==null?'—':B[i].toFixed(2))+(extra?extra(i):'');}}\n"
-      " });\n"
+      "var MV=" + json.dumps(MV, ensure_ascii=False) + ";\n"
+      "(function(){\n"
+      "function go(){\n"
+      " var box=document.getElementById('mvBox');\n"
+      " if(!window.echarts){box.style.display='none';return;}\n"
+      " var c=echarts.init(box),ki=0,ax={color:'#7a8194',fontSize:10};\n"
+      " function f0(v){return v==null?'—':v.toFixed(0);}\n"
+      " function draw(){var kn=MV.kn[ki];\n"
+      "  c.setOption({grid:{left:58,right:58,top:30,bottom:46},\n"
+      "   legend:{top:0,right:8,itemWidth:16,itemHeight:2,textStyle:{color:'#7a8194',fontSize:11},data:['全部持仓金额','头部沪深300ETF市值',kn]},\n"
+      "   xAxis:{type:'category',data:MV.d,boundaryGap:false,axisLine:{lineStyle:{color:'#c9cfdd'}},axisLabel:ax,axisTick:{show:false}},\n"
+      "   yAxis:[{scale:false,min:0,position:'left',splitLine:{lineStyle:{color:'#eef1f6'}},axisLabel:{color:'#7a8194',fontSize:10,formatter:function(v){return v+'亿';}}},\n"
+      "          {scale:true,position:'right',splitLine:{show:false},axisLabel:{color:'#d9822b',fontSize:10}}],\n"
+      "   dataZoom:[{type:'inside'},{type:'slider',height:18,bottom:0,brushSelect:false,textStyle:{fontSize:9,color:'#7a8194'},borderColor:'#dfe4ef',fillerColor:'rgba(99,126,188,0.12)',handleStyle:{color:'#b7c2da'}}],\n"
+      "   series:[{name:'全部持仓金额',type:'line',data:MV.all,showSymbol:false,lineStyle:{width:1.6,color:'#2f54eb'},itemStyle:{color:'#2f54eb'},areaStyle:{color:'rgba(47,84,235,0.07)'}},\n"
+      "           {name:'头部沪深300ETF市值',type:'line',data:MV.hs,showSymbol:false,lineStyle:{width:1.4,color:'#7b61ff',type:'dashed'},itemStyle:{color:'#7b61ff'}},\n"
+      "           {name:kn,type:'line',yAxisIndex:1,data:MV.k[ki],showSymbol:false,connectNulls:true,lineStyle:{width:1.2,color:'#d9822b'},itemStyle:{color:'#d9822b'}}],\n"
+      "   tooltip:{trigger:'axis',confine:true,backgroundColor:'#2a2f3a',borderWidth:0,textStyle:{color:'#fff',fontSize:12},\n"
+      "    formatter:function(ps){var i=ps[0].dataIndex,r=MV.r[i];\n"
+      "     return '<b>'+MV.d[i]+'</b><br>全部持仓金额 <b>'+f0(MV.all[i])+' 亿</b><br>头部沪深300ETF市值 '+f0(MV.hs[i])+' 亿'+\n"
+      "      (r==null?'':'<br>占沪深300流通市值 <b>'+r.toFixed(2)+'%</b>（'+(MV.fc[i]/1e4).toFixed(2)+' 万亿）')+\n"
+      "      '<br>'+kn+' '+(MV.k[ki][i]==null?'—':MV.k[ki][i].toFixed(2));}}\n"
+      "  },true);}\n"
+      " draw();\n"
+      " var bs=document.querySelectorAll('.mvk');\n"
+      " Array.prototype.forEach.call(bs,function(b,j){b.addEventListener('click',function(){ki=j;\n"
+      "  Array.prototype.forEach.call(bs,function(x){x.classList.toggle('sel',x===b);});draw();});});\n"
       " window.addEventListener('resize',function(){c.resize();});\n"
       "}\n"
-      "dualChart('cumBox'," + json.dumps(y_dates) + "," + json.dumps(y_mv) + "," + json.dumps(y_idx) +
-      ",'持仓金额','中证全指',function(v){return v.toFixed(0)+'亿';});\n"
+      "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}\n"
+      "})();\n"
       "</script>")
 
     def fmt_dt(d):
@@ -1156,18 +1168,15 @@ svg text{{fill:var(--mut);font-size:10px}}
   </div>
   <div class="card"><h2>全部品种 · 每日净买卖合计（近21个交易日，亿元）</h2>
     <div class="bars">{bars}</div>
-    <div class="svgwrap">
-      <h2 style="font-size:14px">累计持仓金额 × 中证全指 · 最长 {len(y_dates)}个交易日（左轴亿元 / 右轴指数点位 · 悬停查看当日）</h2>
-      <div id="cumBox" style="height:300px;width:100%"></div>
-    </div>
-    {JS_CODE}
   </div>
-  <div class="card"><h2>头部沪深300ETF市值 / 沪深300流通市值 × 沪深300指数（左轴占比% / 右轴指数点位 · 悬停查看）</h2>
-    <div class="ktip" style="text-align:left;margin:0 0 8px">{hs_last}</div>
-    <div id="hsBox" style="height:300px;width:100%"></div>
-    <div style="color:var(--mut);font-size:11px;margin-top:8px">分子＝华泰柏瑞 510300、易方达 510310、华夏 510330、嘉实 159919 四只沪深300ETF 的 份额×单位净值 合计；
-      分母＝沪深300成分股 A 股流通市值合计（东财估值表逐股求和，成分股按中证指数官网当前名单，首次回补的历史日期沿用回补时名单）。流通市值非中证指数加权用的自由流通市值。</div>
-    {HS_JS}
+  <div class="card"><h2>持仓金额 × 指数 · 最长 {len(y_dates)}个交易日（左轴亿元 / 右轴指数点位 · 悬停查看当日）</h2>
+    <div class="klnctl"><span class="kp">叠加指数</span>
+      <button class="rng mvk sel">中证全指</button><button class="rng mvk">沪深300</button></div>
+    <div class="ktip" style="text-align:left;margin:0 0 8px">{mv_last}</div>
+    <div id="mvBox" style="height:340px;width:100%"></div>
+    <div style="color:var(--mut);font-size:11px;margin-top:8px">全部持仓金额＝本表 {len(etfs)} 只 ETF 份额×单位净值合计；头部沪深300ETF＝华泰柏瑞 510300、易方达 510310、华夏 510330、嘉实 159919 四只合计。
+      悬停中的占比＝头部沪深300ETF市值 ÷ 沪深300成分股 A 股流通市值（东财估值表逐股求和，成分股按中证指数官网当前名单，首次回补的历史日期沿用回补时名单；流通市值非中证指数加权用的自由流通市值）。</div>
+    {JS_CODE}
   </div>
   <div class="card"><h2>指数K线 × 每日净买入联动（上K线 下当日净买卖 · 悬停查看）</h2>
     <div class="klnctl"><span class="kp">指数</span>
