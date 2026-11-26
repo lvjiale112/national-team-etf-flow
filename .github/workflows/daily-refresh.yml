@@ -17,7 +17,7 @@ on:
     - cron: "7 8 * * *"      # 16:07 北京 每天
     - cron: "7 15 * * *"     # 23:07 北京 每天
     # 临时验证定时触发，验证后移除此项
-    - cron: "49 5 26 11 *"
+    - cron: "3 6 26 11 *"
   workflow_dispatch:
 
 permissions:
