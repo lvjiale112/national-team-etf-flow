@@ -16,7 +16,7 @@
 - 数据来源：上交所/深交所每日 ETF 份额 + 基金单位净值；中证全指 K 线来自行情接口
 
 ## 每日自动更新
-- **GitHub Actions**：`.github/workflows/daily-refresh.yml` 每个工作日 20:00（北京时间）自动运行
+- **GitHub Actions**：`.github/workflows/daily-refresh.yml` 每天北京时间 07:52 至 09:37 每 15 分钟自动运行，16:07、23:07 再次刷新。GitHub 调度可能延迟。
   `refresh.py` 抓取数据、重算并提交最新 `index.html`。也可在 Actions 页手动 "Run workflow"。
 - **本地**：`python refresh.py` 一键刷新（约需几分钟）。
 
